@@ -1,5 +1,6 @@
 import os
 from pathlib import Path
+import re
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, UploadFile, File
 from fastapi.responses import FileResponse
@@ -10,8 +11,9 @@ from pydantic import BaseModel
 
 from llama_index.core import (
     SimpleDirectoryReader, VectorStoreIndex, Settings,
-    StorageContext, load_index_from_storage
+    StorageContext, load_index_from_storage, PromptTemplate
 )
+from llama_index.core.postprocessor import SimilarityPostprocessor
 from llama_index.llms.google_genai import GoogleGenAI
 from llama_index.core.node_parser import SentenceSplitter
 from llama_index.core.embeddings import BaseEmbedding
@@ -69,7 +71,12 @@ def _load_index_by_id(index_id: str):
 def _build_full_index() -> tuple[str, VectorStoreIndex]:
     # Configure LLM once per build
     _configure_llm()
-    docs = SimpleDirectoryReader(DATA_DIR).load_data()
+    # Restrict to text-like files to avoid noisy HTML/CSS/JS code
+    docs = SimpleDirectoryReader(
+        DATA_DIR,
+        required_exts=[".txt", ".md"],
+        recursive=True,
+    ).load_data()
     idx = VectorStoreIndex.from_documents(
         docs, transformations=[SentenceSplitter(chunk_size=512)]
     )
@@ -101,9 +108,21 @@ def query_endpoint(request: QueryRequest):
     global index
     if index is None:
         raise HTTPException(status_code=503, detail="Індекс ще не готовий")
-    query_engine = index.as_query_engine(streaming=False)
-    response = query_engine.query(request.query)
-    return {"response": str(response)}
+    # Fallback to direct LLM if retrieved context is weak/irrelevant
+    if _should_fallback_to_llm(request.query):
+        llm = Settings.llm
+        try:
+            comp = llm.complete(f"{_get_system_prompt()}\nПитання: {request.query}")
+            return {"response": str(comp)}
+        except Exception as e:
+            # If direct call fails, fall back to RAG
+            qe = _make_query_engine()
+            resp = qe.query(request.query)
+            return {"response": str(resp), "note": f"LLM fallback failed: {e}"}
+    else:
+        qe = _make_query_engine()
+        resp = qe.query(request.query)
+        return {"response": str(resp)}
 
 @app.post("/refresh")
 def refresh_index():
@@ -162,11 +181,21 @@ def apply_index(req: ApplyIndexRequest):
 # WebSocket streaming endpoint
 # -----------------------------
 
+def _get_system_prompt() -> str:
+    return os.getenv(
+        "SYSTEM_PROMPT",
+        (
+            "Ти дружній україномовний асистент. Відповідай лаконічно, зрозуміло, \n"
+            "дотримуйся ввічливого тону, за потреби наводь списки та приклади."
+        ),
+    )
+
+
 def _build_prompt_from_history(history, message: str) -> str:
     """Compose a single prompt text from chat history and the new message.
     History format: [{"role": "user|assistant|system", "content": str}, ...]
     """
-    parts = []
+    parts = [f"System: {_get_system_prompt()}"]
     for item in history or []:
         role = (item.get("role") or "user").lower()
         content = item.get("content") or ""
@@ -190,6 +219,54 @@ def _configure_llm():
     model = os.getenv("LLM_MODEL", "gemini-1.5-flash")
     Settings.llm = GoogleGenAI(model=model, api_key=GOOGLE_API_KEY)
     Settings.embed_model = GeminiEmbedding(model=os.getenv("EMBED_MODEL", "gemini-embedding-001"), api_key=GOOGLE_API_KEY)
+
+    # Friendlier QA prompt in Ukrainian: use context if relevant; otherwise general knowledge
+    Settings.text_qa_template = PromptTemplate(
+        (
+            f"{_get_system_prompt()}\n\n"
+            "Тобі може бути надано контекст з документів.\n\n"
+            "Контекст (може бути порожнім або нерелевантним):\n{context_str}\n\n"
+            "Запит користувача: {query_str}\n\n"
+            "Інструкції:\n"
+            "- Якщо контекст має відношення до запиту — використай його.\n"
+            "- Якщо контексту бракує або він нерелевантний — відповідай за загальними знаннями.\n"
+            "- Відповідай українською, стисло та по суті."
+        )
+    )
+
+
+def _make_query_engine():
+    """Create a query engine with similarity cutoff to drop weak context."""
+    top_k = int(os.getenv("RAG_TOP_K", "4"))
+    cutoff = float(os.getenv("RAG_CUTOFF", "0.7"))
+    return index.as_query_engine(
+        similarity_top_k=top_k,
+        node_postprocessors=[SimilarityPostprocessor(similarity_cutoff=cutoff)],
+        streaming=False,
+    )
+
+
+def _should_fallback_to_llm(question: str) -> bool:
+    """If retrieval confidence is low, bypass RAG and answer directly."""
+    try:
+        q = (question or "").strip().lower()
+        # Heuristics: greetings or simple definition requests -> direct LLM
+        if re.search(r"\b(привіт|добрий день|вітаю|hello|hi|hey)\b", q):
+            return True
+        if re.search(r"^(що таке|що означає|what is|define)\b", q):
+            return True
+        if len(q) <= 12:  # very short queries tend to be generic
+            return True
+        top_k = int(os.getenv("RAG_TOP_K", "4"))
+        cutoff = float(os.getenv("RAG_CUTOFF", "0.3"))
+        retriever = index.as_retriever(similarity_top_k=top_k)
+        nodes = retriever.retrieve(question)
+        if not nodes:
+            return True
+        best = max((n.score or 0.0) for n in nodes)
+        return best < cutoff
+    except Exception:
+        return True
 
 
 class GeminiGenAIEmbedding(BaseEmbedding):
@@ -266,33 +343,48 @@ async def websocket_endpoint(websocket: WebSocket):
 
             # Query with async streaming
             try:
-                aengine = index.as_query_engine(streaming=True)
-                resp = await aengine.aquery(prompt)
-                final_text_tokens = []
-                async_gen_attr = getattr(resp, "async_response_gen", None)
-                if async_gen_attr is not None:
-                    # Support both API shapes: property (async generator) or callable returning it
-                    agen = async_gen_attr() if callable(async_gen_attr) else async_gen_attr
-                    try:
-                        async for token in agen:
-                            final_text_tokens.append(token)
-                            await websocket.send_json({"type": "token", "token": token})
-                    except TypeError:
-                        # In case it's sync generator exposed wrongly, fall back
-                        pass
-                if not final_text_tokens:
-                    # Fallback to sync generator if available
-                    token_stream = getattr(resp, "response_gen", None)
-                    if token_stream is not None:
-                        for token in token_stream:
-                            final_text_tokens.append(token)
-                            await websocket.send_json({"type": "token", "token": token})
-                if final_text_tokens:
-                    final_text = "".join(final_text_tokens)
-                else:
-                    # No streaming support -> single chunk
-                    final_text = str(resp)
+                final_text = ""
+                if _should_fallback_to_llm(prompt):
+                    # Bypass RAG if context looks weak
+                    comp = Settings.llm.complete(f"{_get_system_prompt()}\nПитання: {prompt}")
+                    final_text = str(comp)
                     await websocket.send_json({"type": "token", "token": final_text})
+                else:
+                    aengine = index.as_query_engine(
+                        streaming=True,
+                        similarity_top_k=int(os.getenv("RAG_TOP_K", "4")),
+                        node_postprocessors=[
+                            SimilarityPostprocessor(
+                                similarity_cutoff=float(os.getenv("RAG_CUTOFF", "0.3"))
+                            )
+                        ],
+                    )
+                    resp = await aengine.aquery(prompt)
+                    final_text_tokens = []
+                    async_gen_attr = getattr(resp, "async_response_gen", None)
+                    if async_gen_attr is not None:
+                        # Support both API shapes: property (async generator) or callable returning it
+                        agen = async_gen_attr() if callable(async_gen_attr) else async_gen_attr
+                        try:
+                            async for token in agen:
+                                final_text_tokens.append(token)
+                                await websocket.send_json({"type": "token", "token": token})
+                        except TypeError:
+                            # In case it's sync generator exposed wrongly, fall back
+                            pass
+                    if not final_text_tokens:
+                        # Fallback to sync generator if available
+                        token_stream = getattr(resp, "response_gen", None)
+                        if token_stream is not None:
+                            for token in token_stream:
+                                final_text_tokens.append(token)
+                                await websocket.send_json({"type": "token", "token": token})
+                    if final_text_tokens:
+                        final_text = "".join(final_text_tokens)
+                    else:
+                        # No streaming support -> single chunk
+                        final_text = str(resp)
+                        await websocket.send_json({"type": "token", "token": final_text})
             except Exception as e:
                 await websocket.send_json({"type": "error", "error": str(e)})
                 continue

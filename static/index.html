@@ -10,10 +10,14 @@
       header { padding: 12px 16px; border-bottom: 1px solid #8883; font-weight: 600; }
       main { display: grid; grid-template-rows: 1fr auto; height: calc(100dvh - 49px); }
       #chat { padding: 16px; overflow: auto; }
-      .msg { margin: 8px 0; padding: 10px 12px; border-radius: 10px; max-width: 80ch; white-space: pre-wrap; }
+      .msg { margin: 8px 0; padding: 10px 12px; border-radius: 10px; max-width: 80ch; }
       .user { background: #2b7; color: #000; align-self: flex-end; }
       .assistant { background: #4445; }
       .system { background: #8883; font-style: italic; }
+      .msg h1, .msg h2, .msg h3 { margin: .4em 0 .3em; }
+      .msg pre { background: #0006; padding: 8px; border-radius: 6px; overflow: auto; }
+      .msg code { background: #0004; padding: 1px 3px; border-radius: 4px; }
+      .msg ul { margin: .3em 0 .3em 1.2em; }
       .row { display: flex; gap: 8px; align-items: center; padding: 8px; border-top: 1px solid #8883; }
       textarea { flex: 1; resize: vertical; min-height: 48px; max-height: 180px; padding: 8px; }
       button { padding: 10px 14px; font-weight: 600; }
@@ -115,10 +119,70 @@
         });
       }
 
+      // --- Minimal Markdown renderer (safe) ---
+      function mdEscape(s) {
+        return s
+          .replace(/&/g, '&amp;')
+          .replace(/</g, '&lt;')
+          .replace(/>/g, '&gt;');
+      }
+
+      function renderMarkdown(src) {
+        let s = String(src || '');
+        // Extract fenced code blocks first and keep placeholders
+        const blocks = [];
+        s = s.replace(/```([\s\S]*?)```/g, (_, code) => {
+          blocks.push('<pre><code>' + mdEscape(code.trim()) + '</code></pre>');
+          return `\u0000BLOCK${blocks.length-1}\u0000`;
+        });
+        // Headings
+        s = s.replace(/^######\s+(.+)$/gm, '<h6>$1</h6>')
+             .replace(/^#####\s+(.+)$/gm, '<h5>$1</h5>')
+             .replace(/^####\s+(.+)$/gm, '<h4>$1</h4>')
+             .replace(/^###\s+(.+)$/gm, '<h3>$1</h3>')
+             .replace(/^##\s+(.+)$/gm, '<h2>$1</h2>')
+             .replace(/^#\s+(.+)$/gm, '<h1>$1</h1>');
+        // Lists (very small state machine)
+        const lines = s.split(/\n/);
+        let out = [];
+        let inUl = false;
+        for (let i = 0; i < lines.length; i++) {
+          const m = lines[i].match(/^\s*[-*]\s+(.+)$/);
+          if (m) {
+            if (!inUl) { inUl = true; out.push('<ul>'); }
+            out.push('<li>' + m[1] + '</li>');
+          } else {
+            if (inUl) { inUl = false; out.push('</ul>'); }
+            out.push(lines[i]);
+          }
+        }
+        if (inUl) out.push('</ul>');
+        s = out.join('\n');
+        // Escape remaining HTML
+        s = s.replace(/&(?![a-zA-Z]+;|#\d+;)/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+        // Inline code
+        s = s.replace(/`([^`]+)`/g, (_, t) => '<code>' + t + '</code>');
+        // Bold and italics (simple)
+        s = s.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+        s = s.replace(/(^|[^*])\*([^*\n]+)\*/g, '$1<em>$2</em>');
+        // Links
+        s = s.replace(/\[([^\]]+)\]\((https?:[^\s)]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>');
+        // Paragraph breaks
+        s = s.replace(/\n\n+/g, '</p><p>');
+        s = '<p>' + s + '</p>';
+        // Reinsert code blocks
+        s = s.replace(/\u0000BLOCK(\d+)\u0000/g, (_, i) => blocks[Number(i)] || '');
+        return s;
+      }
+
       function addMessage(role, content) {
         const div = document.createElement('div');
         div.className = 'msg ' + role;
-        div.textContent = content;
+        if (role === 'assistant' || role === 'system') {
+          div.innerHTML = renderMarkdown(content);
+        } else {
+          div.textContent = content;
+        }
         chatEl.appendChild(div);
         chatEl.scrollTop = chatEl.scrollHeight;
         return div; // return node for streaming updates
@@ -148,7 +212,7 @@
           if (data.type === 'token') {
             if (!streamingNode) streamingNode = addMessage('assistant', '');
             streamingBuffer += data.token;
-            streamingNode.textContent = streamingBuffer;
+            streamingNode.innerHTML = renderMarkdown(streamingBuffer);
           } else if (data.type === 'ready') {
             // handshake message
             statusEl.textContent = 'Підключено';
