@@ -1,0 +1,311 @@
+<!doctype html>
+<html lang="uk">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Knowledge LLM — Чат</title>
+    <style>
+      :root { color-scheme: light dark; }
+      body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 0; padding: 0; }
+      header { padding: 12px 16px; border-bottom: 1px solid #8883; font-weight: 600; }
+      main { display: grid; grid-template-rows: 1fr auto; height: calc(100dvh - 49px); }
+      #chat { padding: 16px; overflow: auto; }
+      .msg { margin: 8px 0; padding: 10px 12px; border-radius: 10px; max-width: 80ch; white-space: pre-wrap; }
+      .user { background: #2b7; color: #000; align-self: flex-end; }
+      .assistant { background: #4445; }
+      .system { background: #8883; font-style: italic; }
+      .row { display: flex; gap: 8px; align-items: center; padding: 8px; border-top: 1px solid #8883; }
+      textarea { flex: 1; resize: vertical; min-height: 48px; max-height: 180px; padding: 8px; }
+      button { padding: 10px 14px; font-weight: 600; }
+      .muted { opacity: .7; font-size: .9em; }
+      #status { padding: 0 12px; }
+      .loading { display: inline-flex; align-items: center; gap: 8px; }
+      .spinner { width: 14px; height: 14px; border: 2px solid #999; border-top-color: transparent; border-radius: 50%; animation: spin 1s linear infinite; }
+      @keyframes spin { to { transform: rotate(360deg); } }
+    </style>
+  </head>
+  <body>
+    <header>
+      Knowledge LLM — Чат (WebSocket)
+      <span style="font-weight:400; margin-left:12px;">
+        API URL:
+        <input id="apiBaseInput" style="width:360px;" placeholder="https://api.example.com" />
+        <button id="saveApiBtn">Зберегти</button>
+        <span id="apiShow" class="muted"></span>
+      </span>
+    </header>
+    <main style="grid-template-columns: 320px 1fr; grid-template-rows: 1fr auto auto; gap: 0;">
+      <aside style="border-right:1px solid #8883; display:flex; flex-direction:column; overflow:auto;">
+        <div style="padding:12px; border-bottom:1px solid #8883; font-weight:600;">Файли контексту</div>
+        <div style="padding:12px; display:flex; flex-direction:column; gap:8px;">
+          <input type="file" id="fileInput" multiple />
+          <button id="uploadBtn">Завантажити</button>
+          <button id="refreshFilesBtn">Оновити список</button>
+          <div id="files" class="muted">(порожньо)</div>
+        </div>
+        <div style="padding:12px; border-top:1px solid #8883; font-weight:600;">Індекси</div>
+        <div style="padding:12px; display:flex; flex-direction:column; gap:8px;">
+          <div>Активний: <span id="activeIndex" class="muted">—</span></div>
+          <button id="buildIndexBtn">Згенерувати індекс</button>
+          <button id="refreshIndexesBtn">Оновити індекси</button>
+          <div id="indexes" class="muted">(немає)</div>
+        </div>
+      </aside>
+      <div id="chat" style="grid-column: 2 / span 1; grid-row: 1 / span 1;"></div>
+      <div class="row" style="grid-column: 2 / span 1; grid-row: 2 / span 1;">
+        <textarea id="input" placeholder="Введіть питання та натисніть Надіслати..."></textarea>
+        <button id="send">Надіслати</button>
+        <span id="loadingIndicator" class="loading" style="display:none;"><span class="spinner"></span>Відповідаю…</span>
+      </div>
+      <div id="status" class="muted" style="grid-column: 1 / span 2; grid-row: 3 / span 1;"></div>
+    </main>
+
+    <script>
+      const chatEl = document.getElementById('chat');
+      const inputEl = document.getElementById('input');
+      const sendBtn = document.getElementById('send');
+      const statusEl = document.getElementById('status');
+      const loadingIndicator = document.getElementById('loadingIndicator');
+
+      // Full chat history that we will send with every ask
+      // Each item: {role: 'user'|'assistant'|'system', content: string}
+      let history = [];
+
+      let ws;
+      let connecting = false;
+      // API base configuration
+      function normalizeBase(s) {
+        if (!s) return location.origin;
+        try { s = s.trim(); } catch {}
+        return s.replace(/\/+$/, '');
+      }
+      let apiBase = normalizeBase(localStorage.getItem('apiBase') || location.origin);
+
+      function api(path) {
+        if (!path.startsWith('/')) path = '/' + path;
+        return apiBase + path;
+      }
+
+      function wsUrl() {
+        try {
+          const u = new URL(apiBase);
+          u.protocol = (u.protocol === 'https:') ? 'wss:' : 'ws:';
+          // Ensure single /ws at the end
+          u.pathname = (u.pathname.replace(/\/+$/, '')) + '/ws';
+          u.search = '';
+          u.hash = '';
+          return u.toString();
+        } catch {
+          const proto = (location.protocol === 'https:') ? 'wss:' : 'ws:';
+          return proto + '//' + apiBase.replace(/^https?:\/\//, '') + '/ws';
+        }
+      }
+
+      function ensureSocket() {
+        if (ws && (ws.readyState === WebSocket.OPEN)) return Promise.resolve();
+        if (connecting) return new Promise((res) => setTimeout(() => res(ensureSocket()), 100));
+        connecting = true;
+        return new Promise((resolve, reject) => {
+          ws = new WebSocket(wsUrl());
+          statusEl.textContent = 'Зʼєднання...';
+          ws.onopen = () => { statusEl.textContent = 'Підключено'; connecting = false; resolve(); };
+          ws.onclose = () => { statusEl.textContent = 'Відключено'; connecting = false; setLoading(false); };
+          ws.onerror = (e) => { statusEl.textContent = 'Помилка вебсокету'; connecting = false; setLoading(false); reject(e); };
+          ws.onmessage = onMessage;
+        });
+      }
+
+      function addMessage(role, content) {
+        const div = document.createElement('div');
+        div.className = 'msg ' + role;
+        div.textContent = content;
+        chatEl.appendChild(div);
+        chatEl.scrollTop = chatEl.scrollHeight;
+        return div; // return node for streaming updates
+      }
+
+      let streamingNode = null;
+      let streamingBuffer = '';
+      let isLoading = false;
+
+      function setLoading(v) {
+        isLoading = !!v;
+        inputEl.disabled = isLoading;
+        sendBtn.disabled = isLoading;
+        loadingIndicator.style.display = isLoading ? 'inline-flex' : 'none';
+        if (!isLoading) inputEl.focus();
+      }
+
+      function onMessage(ev) {
+        // Only attempt to parse JSON frames; ignore non-JSON
+        const text = typeof ev.data === 'string' ? ev.data.trim() : '';
+        if (!text || (text[0] !== '{' && text[0] !== '[')) {
+          console.debug('Non-JSON WS frame ignored:', ev.data);
+          return;
+        }
+        try {
+          const data = JSON.parse(text);
+          if (data.type === 'token') {
+            if (!streamingNode) streamingNode = addMessage('assistant', '');
+            streamingBuffer += data.token;
+            streamingNode.textContent = streamingBuffer;
+          } else if (data.type === 'ready') {
+            // handshake message
+            statusEl.textContent = 'Підключено';
+          } else if (data.type === 'done') {
+            // Finalize assistant message
+            history = data.history || history;
+            streamingNode = null;
+            streamingBuffer = '';
+            setLoading(false);
+          } else if (data.type === 'error') {
+            addMessage('system', 'Помилка: ' + data.error);
+            streamingNode = null;
+            streamingBuffer = '';
+            setLoading(false);
+          }
+        } catch (e) {
+          console.warn('WS JSON parse error', e);
+        }
+      }
+
+      async function sendMessage() {
+        if (isLoading) return; // prevent parallel sends
+        const text = inputEl.value.trim();
+        if (!text) return;
+        inputEl.value = '';
+        addMessage('user', text);
+        history.push({ role: 'user', content: text });
+
+        try {
+          setLoading(true);
+          await ensureSocket();
+          ws.send(JSON.stringify({ type: 'ask', message: text, history }));
+        } catch (e) {
+          addMessage('system', 'Не вдалося підключитись до сервера');
+          setLoading(false);
+        }
+      }
+
+      inputEl.addEventListener('keydown', (e) => {
+        if ((e.key === 'Enter' && !e.shiftKey)) {
+          e.preventDefault();
+          sendMessage();
+        }
+      });
+      sendBtn.addEventListener('click', sendMessage);
+
+      // ------ Files UI ------
+      const filesEl = document.getElementById('files');
+      const fileInput = document.getElementById('fileInput');
+      const uploadBtn = document.getElementById('uploadBtn');
+      const refreshFilesBtn = document.getElementById('refreshFilesBtn');
+
+      async function refreshFiles() {
+        const res = await fetch(api('/files'));
+        const data = await res.json();
+        if (!data.files || !data.files.length) {
+          filesEl.textContent = '(порожньо)';
+          return;
+        }
+        filesEl.innerHTML = '';
+        for (const f of data.files) {
+          const div = document.createElement('div');
+          const sizeKB = Math.round((f.size || 0) / 102.4) / 10;
+          const dt = new Date((f.mtime || 0) * 1000).toLocaleString();
+          div.textContent = `${f.name} — ${sizeKB} KB — ${dt}`;
+          filesEl.appendChild(div);
+        }
+      }
+
+      async function uploadFiles() {
+        const files = fileInput.files;
+        if (!files || files.length === 0) return;
+        for (const f of files) {
+          const fd = new FormData();
+          fd.append('file', f);
+          const res = await fetch(api('/upload'), { method: 'POST', body: fd });
+          if (!res.ok) {
+            addMessage('system', `Не вдалося завантажити ${f.name}`);
+          }
+        }
+        await refreshFiles();
+      }
+
+      uploadBtn.addEventListener('click', uploadFiles);
+      refreshFilesBtn.addEventListener('click', refreshFiles);
+
+      // ------ Indexes UI ------
+      const indexesEl = document.getElementById('indexes');
+      const activeIndexEl = document.getElementById('activeIndex');
+      const buildIndexBtn = document.getElementById('buildIndexBtn');
+      const refreshIndexesBtn = document.getElementById('refreshIndexesBtn');
+
+      async function refreshIndexes() {
+        const res = await fetch(api('/index/list'));
+        const data = await res.json();
+        activeIndexEl.textContent = data.active || '—';
+        const items = data.items || [];
+        if (!items.length) {
+          indexesEl.textContent = '(немає)';
+          return;
+        }
+        indexesEl.innerHTML = '';
+        for (const it of items) {
+          const row = document.createElement('div');
+          const dt = new Date((it.mtime || 0) * 1000).toLocaleString();
+          row.style.display = 'flex';
+          row.style.alignItems = 'center';
+          row.style.gap = '8px';
+          const span = document.createElement('span');
+          span.textContent = `${it.id} — ${dt}`;
+          const btn = document.createElement('button');
+          btn.textContent = 'Застосувати';
+          btn.onclick = async () => {
+            await fetch(api('/index/apply'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ index_id: it.id }) });
+            await refreshIndexes();
+          };
+          row.appendChild(span);
+          row.appendChild(btn);
+          indexesEl.appendChild(row);
+        }
+      }
+
+      async function buildIndex() {
+        const res = await fetch(api('/index/build'), { method: 'POST' });
+        if (res.ok) {
+          addMessage('system', 'Індекс згенеровано');
+          await refreshIndexes();
+        } else {
+          addMessage('system', 'Помилка генерації індексу');
+        }
+      }
+
+      buildIndexBtn.addEventListener('click', buildIndex);
+      refreshIndexesBtn.addEventListener('click', refreshIndexes);
+
+      // API base UI wiring
+      const apiBaseInput = document.getElementById('apiBaseInput');
+      const saveApiBtn = document.getElementById('saveApiBtn');
+      const apiShow = document.getElementById('apiShow');
+      function updateApiUI() {
+        apiBaseInput.value = apiBase;
+        apiShow.textContent = apiBase;
+      }
+      updateApiUI();
+      saveApiBtn.addEventListener('click', async () => {
+        apiBase = normalizeBase(apiBaseInput.value || '');
+        localStorage.setItem('apiBase', apiBase);
+        updateApiUI();
+        try { ws && ws.close && ws.close(); } catch {}
+        ws = null; connecting = false; streamingNode = null; streamingBuffer = '';
+        await refreshFiles();
+        await refreshIndexes();
+      });
+
+      // Initial loads
+      refreshFiles();
+      refreshIndexes();
+    </script>
+  </body>
+  </html>
