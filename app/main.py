@@ -12,7 +12,7 @@ from app.api.routes import indexes as indexes_routes
 from app.api.routes import query as query_routes
 from app.api.routes import ws as ws_routes
 from app.core.config import AppSettings, RuntimeConfig
-from app.core.indexing import latest_index_dir, load_index_by_id, build_full_index
+from app.core.indexing import latest_index_dir, load_index_by_id, build_full_index, has_supported_files
 from app.core.llm import configure_llm
 
 
@@ -63,9 +63,15 @@ def create_app() -> FastAPI:
         # Load latest index or build one
         latest = latest_index_dir(settings.persist_base_path)
         if latest is None:
-            idx_id, idx = build_full_index(settings.data_path, settings.persist_base_path)
-            app.state.active_index_id = idx_id
-            app.state.index = idx
+            # If there’s no persisted index yet, only build if there are files
+            if has_supported_files(settings.data_path):
+                idx_id, idx = build_full_index(settings.data_path, settings.persist_base_path)
+                app.state.active_index_id = idx_id
+                app.state.index = idx
+            else:
+                # Defer indexing until files are present
+                app.state.active_index_id = None
+                app.state.index = None
         else:
             idx_id, _ = latest
             app.state.active_index_id = idx_id
@@ -75,4 +81,3 @@ def create_app() -> FastAPI:
 
 
 app = create_app()
-

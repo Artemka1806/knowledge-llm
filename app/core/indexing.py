@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Iterable, List, Optional, Tuple
 
 from llama_index.core import (
     SimpleDirectoryReader,
@@ -54,3 +54,12 @@ def build_full_index(data_dir: Path, persist_base: Path) -> tuple[str, VectorSto
     idx.storage_context.persist(persist_dir=str(persist_dir))
     return index_id, idx
 
+
+def has_supported_files(data_dir: Path, exts: Iterable[str] = (".txt", ".md")) -> bool:
+    if not data_dir.exists():
+        return False
+    exts_l = {e.lower() for e in exts}
+    for p in data_dir.rglob("*"):
+        if p.is_file() and p.suffix.lower() in exts_l:
+            return True
+    return False
