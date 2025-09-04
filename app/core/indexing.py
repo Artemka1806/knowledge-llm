@@ -1,0 +1,56 @@
+from __future__ import annotations
+
+from datetime import datetime
+from pathlib import Path
+from typing import List, Optional, Tuple
+
+from llama_index.core import (
+    SimpleDirectoryReader,
+    VectorStoreIndex,
+    StorageContext,
+    load_index_from_storage,
+)
+from llama_index.core.node_parser import SentenceSplitter
+
+
+def list_index_dirs(base_dir: Path) -> List[Tuple[str, Path]]:
+    if not base_dir.exists():
+        return []
+    items: List[Tuple[str, Path]] = []
+    for child in base_dir.iterdir():
+        if child.is_dir() and (child / "docstore.json").exists():
+            items.append((child.name, child))
+    return items
+
+
+def latest_index_dir(base_dir: Path) -> Optional[Tuple[str, Path]]:
+    items = list_index_dirs(base_dir)
+    if not items:
+        return None
+    items.sort(key=lambda x: x[1].stat().st_mtime, reverse=True)
+    return items[0]
+
+
+def load_index_by_id(persist_base: Path, index_id: str) -> VectorStoreIndex:
+    storage_dir = persist_base / index_id
+    if not storage_dir.exists():
+        raise FileNotFoundError(f"Index '{index_id}' not found")
+    storage_context = StorageContext.from_defaults(persist_dir=str(storage_dir))
+    return load_index_from_storage(storage_context)
+
+
+def build_full_index(data_dir: Path, persist_base: Path) -> tuple[str, VectorStoreIndex]:
+    docs = SimpleDirectoryReader(
+        str(data_dir),
+        required_exts=[".txt", ".md"],
+        recursive=True,
+    ).load_data()
+    idx = VectorStoreIndex.from_documents(
+        docs, transformations=[SentenceSplitter(chunk_size=512)]
+    )
+    index_id = datetime.now().strftime("%Y%m%d-%H%M%S")
+    persist_dir = persist_base / index_id
+    persist_dir.mkdir(parents=True, exist_ok=True)
+    idx.storage_context.persist(persist_dir=str(persist_dir))
+    return index_id, idx
+
