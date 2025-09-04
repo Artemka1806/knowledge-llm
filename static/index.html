@@ -54,6 +54,27 @@
           <button id="refreshIndexesBtn">Оновити індекси</button>
           <div id="indexes" class="muted">(немає)</div>
         </div>
+        <div style="padding:12px; border-top:1px solid #8883; font-weight:600;">RAG Налаштування</div>
+        <div style="padding:12px; display:flex; flex-direction:column; gap:8px;">
+          <label>Режим:
+            <select id="ragModeSel">
+              <option value="auto">auto</option>
+              <option value="rag_only">rag_only</option>
+              <option value="llm_only">llm_only</option>
+            </select>
+          </label>
+          <label>Top K:
+            <input id="ragTopKInput" type="number" min="1" max="50" step="1" style="width:100px;" />
+          </label>
+          <label>Cutoff:
+            <input id="ragCutoffInput" type="number" min="0" max="1" step="0.01" style="width:100px;" />
+          </label>
+          <div style="display:flex; gap:8px;">
+            <button id="saveConfigBtn">Зберегти RAG</button>
+            <button id="refreshConfigBtn">Оновити</button>
+          </div>
+          <div id="configInfo" class="muted"></div>
+        </div>
       </aside>
       <div id="chat" style="grid-column: 2 / span 1; grid-row: 1 / span 1;"></div>
       <div class="row" style="grid-column: 2 / span 1; grid-row: 2 / span 1;">
@@ -175,11 +196,70 @@
         return s;
       }
 
+      // --- Very small HTML sanitizer with whitelist ---
+      function sanitizeHTML(html) {
+        const tpl = document.createElement('template');
+        tpl.innerHTML = String(html || '');
+        const ALLOWED = new Set(['A','P','BR','UL','OL','LI','STRONG','B','EM','I','CODE','PRE','H1','H2','H3','H4','H5','H6','DIV','SPAN']);
+        const ALLOWED_ATTR = { A: new Set(['href','title','target','rel']) };
+        const URL_ATTRS = new Set(['href']);
+        const SAFE_PROTOCOLS = new Set(['http:','https:','mailto:']);
+        const walker = (node) => {
+          // Remove script/style/iframe completely
+          if (node.nodeType === Node.ELEMENT_NODE) {
+            const tag = node.tagName;
+            if (!ALLOWED.has(tag)) {
+              const txt = document.createTextNode(node.textContent || '');
+              node.replaceWith(txt);
+              return; // no deeper walk needed
+            }
+            // scrub attributes
+            const allowedForTag = ALLOWED_ATTR[tag] || new Set();
+            for (const attr of Array.from(node.attributes)) {
+              const name = attr.name.toLowerCase();
+              if (name.startsWith('on') || name === 'style') {
+                node.removeAttribute(attr.name); continue;
+              }
+              if (!allowedForTag.has(attr.name)) {
+                // Only a[href], etc. Others dropped
+                if (!(tag === 'A' && allowedForTag.has('href') && name === 'href')) {
+                  node.removeAttribute(attr.name); continue;
+                }
+              }
+              if (URL_ATTRS.has(attr.name)) {
+                try {
+                  const url = new URL(attr.value, document.baseURI);
+                  if (!SAFE_PROTOCOLS.has(url.protocol)) node.removeAttribute(attr.name);
+                } catch { node.removeAttribute(attr.name); }
+              }
+            }
+            // enforce safe defaults for links
+            if (tag === 'A') {
+              if (!node.getAttribute('rel')) node.setAttribute('rel','noopener noreferrer');
+              if (!node.getAttribute('target')) node.setAttribute('target','_blank');
+            }
+          }
+          for (const ch of Array.from(node.childNodes)) walker(ch);
+        };
+        for (const ch of Array.from(tpl.content.childNodes)) walker(ch);
+        return tpl.innerHTML;
+      }
+
+      function isLikelyHTML(s) {
+        return /<\s*(p|ul|ol|li|strong|em|b|i|h[1-6]|code|pre|br|a|div|span)(\s|>|\/)/i.test(String(s||''));
+      }
+
+      function renderRichText(src) {
+        const s = String(src || '');
+        if (isLikelyHTML(s)) return sanitizeHTML(s);
+        return renderMarkdown(s);
+      }
+
       function addMessage(role, content) {
         const div = document.createElement('div');
         div.className = 'msg ' + role;
         if (role === 'assistant' || role === 'system') {
-          div.innerHTML = renderMarkdown(content);
+          div.innerHTML = renderRichText(content);
         } else {
           div.textContent = content;
         }
@@ -212,7 +292,7 @@
           if (data.type === 'token') {
             if (!streamingNode) streamingNode = addMessage('assistant', '');
             streamingBuffer += data.token;
-            streamingNode.innerHTML = renderMarkdown(streamingBuffer);
+            streamingNode.innerHTML = renderRichText(streamingBuffer);
           } else if (data.type === 'ready') {
             // handshake message
             statusEl.textContent = 'Підключено';
@@ -304,6 +384,13 @@
       const activeIndexEl = document.getElementById('activeIndex');
       const buildIndexBtn = document.getElementById('buildIndexBtn');
       const refreshIndexesBtn = document.getElementById('refreshIndexesBtn');
+      // Config UI
+      const ragModeSel = document.getElementById('ragModeSel');
+      const ragTopKInput = document.getElementById('ragTopKInput');
+      const ragCutoffInput = document.getElementById('ragCutoffInput');
+      const saveConfigBtn = document.getElementById('saveConfigBtn');
+      const refreshConfigBtn = document.getElementById('refreshConfigBtn');
+      const configInfo = document.getElementById('configInfo');
 
       async function refreshIndexes() {
         const res = await fetch(api('/index/list'));
@@ -347,6 +434,51 @@
 
       buildIndexBtn.addEventListener('click', buildIndex);
       refreshIndexesBtn.addEventListener('click', refreshIndexes);
+      
+      // ------ Config UI ------
+      async function refreshConfig() {
+        try {
+          const res = await fetch(api('/config'));
+          if (!res.ok) throw new Error('HTTP ' + res.status);
+          const data = await res.json();
+          ragModeSel.value = data.rag_mode || 'auto';
+          ragTopKInput.value = data.rag_top_k != null ? data.rag_top_k : 4;
+          ragCutoffInput.value = data.rag_cutoff != null ? data.rag_cutoff : 0.3;
+          configInfo.textContent = `mode=${ragModeSel.value}, topK=${ragTopKInput.value}, cutoff=${ragCutoffInput.value}`;
+        } catch (e) {
+          configInfo.textContent = 'Не вдалося отримати конфіг';
+        }
+      }
+
+      async function saveConfig() {
+        const body = {
+          rag_mode: ragModeSel.value,
+          rag_top_k: Number(ragTopKInput.value || 4),
+          rag_cutoff: Number(ragCutoffInput.value || 0.3),
+        };
+        try {
+          const res = await fetch(api('/config'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+          });
+          if (!res.ok) {
+            const txt = await res.text().catch(()=> '');
+            throw new Error('HTTP ' + res.status + ' ' + txt);
+          }
+          const data = await res.json();
+          ragModeSel.value = data.rag_mode || 'auto';
+          ragTopKInput.value = data.rag_top_k != null ? data.rag_top_k : 4;
+          ragCutoffInput.value = data.rag_cutoff != null ? data.rag_cutoff : 0.3;
+          configInfo.textContent = `Збережено: mode=${data.rag_mode}, topK=${data.rag_top_k}, cutoff=${data.rag_cutoff}`;
+          addMessage('system', 'RAG налаштування збережено');
+        } catch (e) {
+          addMessage('system', 'Помилка збереження RAG: ' + e.message);
+        }
+      }
+
+      saveConfigBtn.addEventListener('click', saveConfig);
+      refreshConfigBtn.addEventListener('click', refreshConfig);
 
       // API base UI wiring
       const apiBaseInput = document.getElementById('apiBaseInput');
@@ -365,11 +497,13 @@
         ws = null; connecting = false; streamingNode = null; streamingBuffer = '';
         await refreshFiles();
         await refreshIndexes();
+        await refreshConfig();
       });
 
       // Initial loads
       refreshFiles();
       refreshIndexes();
+      refreshConfig();
     </script>
   </body>
   </html>

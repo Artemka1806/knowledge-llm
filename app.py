@@ -27,6 +27,17 @@ GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 DATA_DIR = "./data"
 PERSIST_BASE_DIR = "./storage"  # indexes will be stored under storage/{index_id}
 
+# Runtime-configurable RAG settings (can be changed via /config)
+RAG_MODE = (os.getenv("RAG_MODE", "auto") or "auto").strip().lower()  # auto|rag_only|llm_only
+try:
+    RAG_TOP_K = int(os.getenv("RAG_TOP_K", "4"))
+except Exception:
+    RAG_TOP_K = 4
+try:
+    RAG_CUTOFF = float(os.getenv("RAG_CUTOFF", "0.3"))
+except Exception:
+    RAG_CUTOFF = 0.3
+
 app = FastAPI()
 index = None
 active_index_id = None
@@ -36,6 +47,12 @@ class QueryRequest(BaseModel):
 
 class ApplyIndexRequest(BaseModel):
     index_id: str
+
+
+class ConfigUpdate(BaseModel):
+    rag_mode: Optional[str] = None  # auto|rag_only|llm_only
+    rag_top_k: Optional[int] = None
+    rag_cutoff: Optional[float] = None
 
 def _list_index_dirs() -> List[Tuple[str, Path]]:
     base = Path(PERSIST_BASE_DIR)
@@ -237,34 +254,40 @@ def _configure_llm():
 
 def _make_query_engine():
     """Create a query engine with similarity cutoff to drop weak context."""
-    top_k = int(os.getenv("RAG_TOP_K", "4"))
-    cutoff = float(os.getenv("RAG_CUTOFF", "0.7"))
     return index.as_query_engine(
-        similarity_top_k=top_k,
-        node_postprocessors=[SimilarityPostprocessor(similarity_cutoff=cutoff)],
+        similarity_top_k=RAG_TOP_K,
+        node_postprocessors=[SimilarityPostprocessor(similarity_cutoff=RAG_CUTOFF)],
         streaming=False,
     )
 
 
 def _should_fallback_to_llm(question: str) -> bool:
-    """If retrieval confidence is low, bypass RAG and answer directly."""
+    """Decide whether to bypass RAG and answer directly with the LLM.
+
+    Modes (via env `RAG_MODE`):
+    - "rag_only": never fallback; always use storage index
+    - "llm_only": always fallback; never use storage
+    - "auto" (default): use retrieval confidence to decide; only fallback if weak
+    """
     try:
+        mode = (RAG_MODE or "auto").strip().lower()
+        if mode == "rag_only":
+            return False
+        if mode == "llm_only":
+            return True
+
         q = (question or "").strip().lower()
-        # Heuristics: greetings or simple definition requests -> direct LLM
+        # Only treat clear greetings as LLM-only in auto mode
         if re.search(r"\b(привіт|добрий день|вітаю|hello|hi|hey)\b", q):
             return True
-        if re.search(r"^(що таке|що означає|what is|define)\b", q):
-            return True
-        if len(q) <= 12:  # very short queries tend to be generic
-            return True
-        top_k = int(os.getenv("RAG_TOP_K", "4"))
-        cutoff = float(os.getenv("RAG_CUTOFF", "0.3"))
-        retriever = index.as_retriever(similarity_top_k=top_k)
+
+        # Retrieval-based decision: if best similarity < cutoff, fallback
+        retriever = index.as_retriever(similarity_top_k=RAG_TOP_K)
         nodes = retriever.retrieve(question)
         if not nodes:
             return True
         best = max((n.score or 0.0) for n in nodes)
-        return best < cutoff
+        return best < RAG_CUTOFF
     except Exception:
         return True
 
@@ -344,7 +367,7 @@ async def websocket_endpoint(websocket: WebSocket):
             # Query with async streaming
             try:
                 final_text = ""
-                if _should_fallback_to_llm(prompt):
+                if _should_fallback_to_llm(message):
                     # Bypass RAG if context looks weak
                     comp = Settings.llm.complete(f"{_get_system_prompt()}\nПитання: {prompt}")
                     final_text = str(comp)
@@ -352,14 +375,15 @@ async def websocket_endpoint(websocket: WebSocket):
                 else:
                     aengine = index.as_query_engine(
                         streaming=True,
-                        similarity_top_k=int(os.getenv("RAG_TOP_K", "4")),
+                        similarity_top_k=RAG_TOP_K,
                         node_postprocessors=[
                             SimilarityPostprocessor(
-                                similarity_cutoff=float(os.getenv("RAG_CUTOFF", "0.3"))
+                                similarity_cutoff=RAG_CUTOFF
                             )
                         ],
                     )
-                    resp = await aengine.aquery(prompt)
+                    # Use the user's latest message for retrieval
+                    resp = await aengine.aquery(message)
                     final_text_tokens = []
                     async_gen_attr = getattr(resp, "async_response_gen", None)
                     if async_gen_attr is not None:
@@ -457,3 +481,43 @@ def list_indexes():
         })
     items.sort(key=lambda x: x["mtime"], reverse=True)
     return {"active": active_index_id, "items": items}
+
+
+# -----------------------------
+# Runtime config endpoints
+# -----------------------------
+
+@app.get("/config")
+def get_config():
+    return {
+        "rag_mode": RAG_MODE,
+        "rag_top_k": RAG_TOP_K,
+        "rag_cutoff": RAG_CUTOFF,
+    }
+
+
+@app.post("/config")
+def set_config(update: ConfigUpdate):
+    global RAG_MODE, RAG_TOP_K, RAG_CUTOFF
+    if update.rag_mode is not None:
+        mode = (update.rag_mode or "").strip().lower()
+        if mode not in ("auto", "rag_only", "llm_only"):
+            raise HTTPException(status_code=400, detail="Невірний rag_mode (auto|rag_only|llm_only)")
+        RAG_MODE = mode
+    if update.rag_top_k is not None:
+        try:
+            v = int(update.rag_top_k)
+            if v < 1 or v > 50:
+                raise ValueError
+            RAG_TOP_K = v
+        except Exception:
+            raise HTTPException(status_code=400, detail="rag_top_k має бути цілим 1..50")
+    if update.rag_cutoff is not None:
+        try:
+            v = float(update.rag_cutoff)
+            if not (0.0 <= v <= 1.0):
+                raise ValueError
+            RAG_CUTOFF = v
+        except Exception:
+            raise HTTPException(status_code=400, detail="rag_cutoff має бути числом 0.0..1.0")
+    return get_config()
