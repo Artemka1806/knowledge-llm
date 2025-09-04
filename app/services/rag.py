@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import re
 from typing import Any, Dict, List
 
@@ -18,7 +19,7 @@ def make_query_engine(index, runtime: RuntimeConfig):
     )
 
 
-def should_fallback_to_llm(question: str, index, runtime: RuntimeConfig) -> bool:
+async def should_fallback_to_llm(question: str, index, runtime: RuntimeConfig) -> bool:
     try:
         mode = (runtime.rag_mode or "auto").strip().lower()
         if mode == "rag_only":
@@ -31,7 +32,14 @@ def should_fallback_to_llm(question: str, index, runtime: RuntimeConfig) -> bool
             return True
 
         retriever = index.as_retriever(similarity_top_k=runtime.rag_top_k)
-        nodes = retriever.retrieve(question)
+        nodes = None
+        # Prefer async retrieval if supported
+        aretrieve = getattr(retriever, "aretrieve", None)
+        if callable(aretrieve):
+            nodes = await aretrieve(question)
+        else:
+            # Offload sync retrieval to a thread to avoid blocking
+            nodes = await asyncio.to_thread(retriever.retrieve, question)
         if not nodes:
             return True
         best = max((n.score or 0.0) for n in nodes)
@@ -54,4 +62,3 @@ def build_prompt_from_history(system_prompt: str, history: List[Dict[str, Any]],
     parts.append(f"User: {message}")
     parts.append("Assistant:")
     return "\n".join(parts)
-

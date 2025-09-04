@@ -46,8 +46,15 @@ async def websocket_endpoint(websocket: WebSocket):
 
             try:
                 final_text = ""
-                if should_fallback_to_llm(message, index, runtime):
-                    comp = Settings.llm.complete(f"{runtime.system_prompt}\nПитання: {prompt}")
+                if await should_fallback_to_llm(message, index, runtime):
+                    llm = Settings.llm
+                    acomplete = getattr(llm, "acomplete", None)
+                    if callable(acomplete):
+                        comp = await acomplete(f"{runtime.system_prompt}\nПитання: {prompt}")
+                    else:
+                        # Offload sync completion to a thread
+                        import asyncio as _asyncio
+                        comp = await _asyncio.to_thread(llm.complete, f"{runtime.system_prompt}\nПитання: {prompt}")
                     final_text = str(comp)
                     await websocket.send_json({"type": "token", "token": final_text})
                 else:
