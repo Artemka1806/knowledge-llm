@@ -12,11 +12,15 @@ from llama_index.core import (
     SimpleDirectoryReader, VectorStoreIndex, Settings,
     StorageContext, load_index_from_storage
 )
-from llama_index.llms.openai import OpenAI
+from llama_index.llms.google_genai import GoogleGenAI
 from llama_index.core.node_parser import SentenceSplitter
+from llama_index.core.embeddings import BaseEmbedding
+from llama_index.embeddings.gemini import GeminiEmbedding
+
+from google import genai
 
 load_dotenv(dotenv_path=Path(__file__).parent / ".env")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 
 DATA_DIR = "./data"
 PERSIST_BASE_DIR = "./storage"  # indexes will be stored under storage/{index_id}
@@ -178,11 +182,40 @@ def _build_prompt_from_history(history, message: str) -> str:
 
 
 def _configure_llm():
-    """Configure a streaming-capable LLM for LlamaIndex.
-    Use a known streaming model id. Adjust if you prefer another.
+    """Configure Gemini LLM and Gemini embeddings via google-genai.
+    LLM: LlamaIndex Gemini wrapper; Embeddings: custom class using google-genai.
     """
-    model = os.getenv("LLM_MODEL", "gpt-4o-mini")
-    Settings.llm = OpenAI(model=model, api_key=OPENAI_API_KEY)
+    if not GOOGLE_API_KEY:
+        raise RuntimeError("GOOGLE_API_KEY не задано у .env")
+    model = os.getenv("LLM_MODEL", "gemini-1.5-flash")
+    Settings.llm = GoogleGenAI(model=model, api_key=GOOGLE_API_KEY)
+    Settings.embed_model = GeminiEmbedding(model=os.getenv("EMBED_MODEL", "gemini-embedding-001"), api_key=GOOGLE_API_KEY)
+
+
+class GeminiGenAIEmbedding(BaseEmbedding):
+    """Embeddings via google-genai embed_content API."""
+    def __init__(self, model: str = "gemini-embedding-001", api_key: Optional[str] = None):
+        self.model = model
+        self.client = genai.Client(api_key=api_key) if api_key else genai.Client()
+
+    def _extract_embedding(self, result) -> List[float]:
+        emb = getattr(result, "embeddings", None)
+        if emb is None:
+            emb = getattr(result, "embedding", None)
+            if emb is None:
+                return []
+            vals = getattr(emb, "values", None)
+            return list(vals) if vals is not None else list(emb)
+        first = emb[0] if isinstance(emb, (list, tuple)) and emb else emb
+        vals = getattr(first, "values", None)
+        return list(vals) if vals is not None else list(first)
+
+    def get_text_embedding(self, text: str) -> List[float]:
+        res = self.client.models.embed_content(model=self.model, contents=text)
+        return self._extract_embedding(res)
+
+    def get_text_embeddings(self, texts: List[str]) -> List[List[float]]:
+        return [self.get_text_embedding(t) for t in texts]
 
 
 @app.websocket("/ws")

@@ -5,3 +5,8 @@ chromadb>=0.4.0
 faiss-cpu>=1.7.4
 fastapi==0.116.1
 python-multipart>=0.0.9
+llama-index-utils-workflow
+llama-index-llms-google-genai
+llama-index-tools-google
+google-genai
+llama-index-embeddings-gemini
