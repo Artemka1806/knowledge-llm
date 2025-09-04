@@ -64,7 +64,7 @@ def _load_index_by_id(index_id: str):
 
 def _build_full_index() -> tuple[str, VectorStoreIndex]:
     # Configure LLM once per build
-    Settings.llm = OpenAI(model="gpt-5", api_key=OPENAI_API_KEY)
+    _configure_llm()
     docs = SimpleDirectoryReader(DATA_DIR).load_data()
     idx = VectorStoreIndex.from_documents(
         docs, transformations=[SentenceSplitter(chunk_size=512)]
@@ -89,7 +89,7 @@ def startup_event():
     else:
         active_index_id, path = latest
         # Ensure LLM configured for runtime
-        Settings.llm = OpenAI(model="gpt-5", api_key=OPENAI_API_KEY)
+        _configure_llm()
         index = _load_index_by_id(active_index_id)
 
 @app.post("/query")
@@ -145,7 +145,7 @@ def build_index_all_files():
 def apply_index(req: ApplyIndexRequest):
     global index, active_index_id
     try:
-        Settings.llm = OpenAI(model="gpt-5", api_key=OPENAI_API_KEY)
+        _configure_llm()
         idx = _load_index_by_id(req.index_id)
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail="Індекс не знайдено")
@@ -175,6 +175,14 @@ def _build_prompt_from_history(history, message: str) -> str:
     parts.append(f"User: {message}")
     parts.append("Assistant:")
     return "\n".join(parts)
+
+
+def _configure_llm():
+    """Configure a streaming-capable LLM for LlamaIndex.
+    Use a known streaming model id. Adjust if you prefer another.
+    """
+    model = os.getenv("LLM_MODEL", "gpt-4o-mini")
+    Settings.llm = OpenAI(model=model, api_key=OPENAI_API_KEY)
 
 
 @app.websocket("/ws")
@@ -223,22 +231,35 @@ async def websocket_endpoint(websocket: WebSocket):
             # Build a single prompt with history context
             prompt = _build_prompt_from_history(history, message)
 
-            # Query with streaming
-            query_engine = index.as_query_engine(streaming=True)
-            resp = query_engine.query(prompt)
-
-            final_text_tokens = []
+            # Query with async streaming
             try:
-                token_stream = getattr(resp, "response_gen", None)
-                if token_stream is None:
-                    # Fallback: non-streaming response or unsupported API
+                aengine = index.as_query_engine(streaming=True)
+                resp = await aengine.aquery(prompt)
+                final_text_tokens = []
+                async_gen_attr = getattr(resp, "async_response_gen", None)
+                if async_gen_attr is not None:
+                    # Support both API shapes: property (async generator) or callable returning it
+                    agen = async_gen_attr() if callable(async_gen_attr) else async_gen_attr
+                    try:
+                        async for token in agen:
+                            final_text_tokens.append(token)
+                            await websocket.send_json({"type": "token", "token": token})
+                    except TypeError:
+                        # In case it's sync generator exposed wrongly, fall back
+                        pass
+                if not final_text_tokens:
+                    # Fallback to sync generator if available
+                    token_stream = getattr(resp, "response_gen", None)
+                    if token_stream is not None:
+                        for token in token_stream:
+                            final_text_tokens.append(token)
+                            await websocket.send_json({"type": "token", "token": token})
+                if final_text_tokens:
+                    final_text = "".join(final_text_tokens)
+                else:
+                    # No streaming support -> single chunk
                     final_text = str(resp)
                     await websocket.send_json({"type": "token", "token": final_text})
-                else:
-                    for token in token_stream:
-                        final_text_tokens.append(token)
-                        await websocket.send_json({"type": "token", "token": token})
-                    final_text = "".join(final_text_tokens)
             except Exception as e:
                 await websocket.send_json({"type": "error", "error": str(e)})
                 continue
