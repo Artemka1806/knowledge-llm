@@ -54,7 +54,7 @@
           <button id="refreshIndexesBtn">Оновити індекси</button>
           <div id="indexes" class="muted">(немає)</div>
         </div>
-        <div style="padding:12px; border-top:1px solid #8883; font-weight:600;">RAG Налаштування</div>
+        <div style="padding:12px; border-top:1px solid #8883; font-weight:600;">Налаштування</div>
         <div style="padding:12px; display:flex; flex-direction:column; gap:8px;">
           <label>Режим:
             <select id="ragModeSel">
@@ -68,6 +68,9 @@
           </label>
           <label>Cutoff:
             <input id="ragCutoffInput" type="number" min="0" max="1" step="0.01" style="width:100px;" />
+          </label>
+          <label>Системний промпт:
+            <textarea id="systemPromptInput" rows="6" placeholder="Опишіть роль і стиль асистента..." style="width:100%;"></textarea>
           </label>
           <div style="display:flex; gap:8px;">
             <button id="saveConfigBtn">Зберегти RAG</button>
@@ -388,6 +391,7 @@
       const ragModeSel = document.getElementById('ragModeSel');
       const ragTopKInput = document.getElementById('ragTopKInput');
       const ragCutoffInput = document.getElementById('ragCutoffInput');
+      const systemPromptInput = document.getElementById('systemPromptInput');
       const saveConfigBtn = document.getElementById('saveConfigBtn');
       const refreshConfigBtn = document.getElementById('refreshConfigBtn');
       const configInfo = document.getElementById('configInfo');
@@ -444,6 +448,7 @@
           ragModeSel.value = data.rag_mode || 'auto';
           ragTopKInput.value = data.rag_top_k != null ? data.rag_top_k : 4;
           ragCutoffInput.value = data.rag_cutoff != null ? data.rag_cutoff : 0.3;
+          systemPromptInput.value = data.system_prompt || '';
           configInfo.textContent = `mode=${ragModeSel.value}, topK=${ragTopKInput.value}, cutoff=${ragCutoffInput.value}`;
         } catch (e) {
           configInfo.textContent = 'Не вдалося отримати конфіг';
@@ -455,6 +460,7 @@
           rag_mode: ragModeSel.value,
           rag_top_k: Number(ragTopKInput.value || 4),
           rag_cutoff: Number(ragCutoffInput.value || 0.3),
+          system_prompt: systemPromptInput.value,
         };
         try {
           const res = await fetch(api('/config'), {
@@ -470,10 +476,11 @@
           ragModeSel.value = data.rag_mode || 'auto';
           ragTopKInput.value = data.rag_top_k != null ? data.rag_top_k : 4;
           ragCutoffInput.value = data.rag_cutoff != null ? data.rag_cutoff : 0.3;
+          systemPromptInput.value = data.system_prompt || '';
           configInfo.textContent = `Збережено: mode=${data.rag_mode}, topK=${data.rag_top_k}, cutoff=${data.rag_cutoff}`;
-          addMessage('system', 'RAG налаштування збережено');
+          addMessage('system', 'Налаштування збережено');
         } catch (e) {
-          addMessage('system', 'Помилка збереження RAG: ' + e.message);
+          addMessage('system', 'Помилка збереження налаштувань: ' + e.message);
         }
       }
 

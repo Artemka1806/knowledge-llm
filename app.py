@@ -27,7 +27,7 @@ GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 DATA_DIR = "./data"
 PERSIST_BASE_DIR = "./storage"  # indexes will be stored under storage/{index_id}
 
-# Runtime-configurable RAG settings (can be changed via /config)
+# Runtime-configurable settings (can be changed via /config)
 RAG_MODE = (os.getenv("RAG_MODE", "auto") or "auto").strip().lower()  # auto|rag_only|llm_only
 try:
     RAG_TOP_K = int(os.getenv("RAG_TOP_K", "4"))
@@ -37,6 +37,13 @@ try:
     RAG_CUTOFF = float(os.getenv("RAG_CUTOFF", "0.3"))
 except Exception:
     RAG_CUTOFF = 0.3
+
+# System prompt runtime value
+DEFAULT_SYSTEM_PROMPT = (
+    "Ти дружній україномовний асистент. Відповідай лаконічно, зрозуміло, \n"
+    "дотримуйся ввічливого тону, за потреби наводь списки та приклади."
+)
+SYSTEM_PROMPT_VALUE = os.getenv("SYSTEM_PROMPT", DEFAULT_SYSTEM_PROMPT)
 
 app = FastAPI()
 index = None
@@ -53,6 +60,7 @@ class ConfigUpdate(BaseModel):
     rag_mode: Optional[str] = None  # auto|rag_only|llm_only
     rag_top_k: Optional[int] = None
     rag_cutoff: Optional[float] = None
+    system_prompt: Optional[str] = None
 
 def _list_index_dirs() -> List[Tuple[str, Path]]:
     base = Path(PERSIST_BASE_DIR)
@@ -199,12 +207,22 @@ def apply_index(req: ApplyIndexRequest):
 # -----------------------------
 
 def _get_system_prompt() -> str:
-    return os.getenv(
-        "SYSTEM_PROMPT",
+    return SYSTEM_PROMPT_VALUE
+
+
+def _apply_text_qa_template():
+    # Friendlier QA prompt in Ukrainian: use context if relevant; otherwise general knowledge
+    Settings.text_qa_template = PromptTemplate(
         (
-            "Ти дружній україномовний асистент. Відповідай лаконічно, зрозуміло, \n"
-            "дотримуйся ввічливого тону, за потреби наводь списки та приклади."
-        ),
+            f"{_get_system_prompt()}\n\n"
+            "Тобі може бути надано контекст з документів.\n\n"
+            "Контекст (може бути порожнім або нерелевантним):\n{context_str}\n\n"
+            "Запит користувача: {query_str}\n\n"
+            "Інструкції:\n"
+            "- Якщо контекст має відношення до запиту — використай його.\n"
+            "- Якщо контексту бракує або він нерелевантний — відповідай за загальними знаннями.\n"
+            "- Відповідай українською, стисло та по суті."
+        )
     )
 
 
@@ -237,19 +255,7 @@ def _configure_llm():
     Settings.llm = GoogleGenAI(model=model, api_key=GOOGLE_API_KEY)
     Settings.embed_model = GeminiEmbedding(model=os.getenv("EMBED_MODEL", "gemini-embedding-001"), api_key=GOOGLE_API_KEY)
 
-    # Friendlier QA prompt in Ukrainian: use context if relevant; otherwise general knowledge
-    Settings.text_qa_template = PromptTemplate(
-        (
-            f"{_get_system_prompt()}\n\n"
-            "Тобі може бути надано контекст з документів.\n\n"
-            "Контекст (може бути порожнім або нерелевантним):\n{context_str}\n\n"
-            "Запит користувача: {query_str}\n\n"
-            "Інструкції:\n"
-            "- Якщо контекст має відношення до запиту — використай його.\n"
-            "- Якщо контексту бракує або він нерелевантний — відповідай за загальними знаннями.\n"
-            "- Відповідай українською, стисло та по суті."
-        )
-    )
+    _apply_text_qa_template()
 
 
 def _make_query_engine():
@@ -493,12 +499,13 @@ def get_config():
         "rag_mode": RAG_MODE,
         "rag_top_k": RAG_TOP_K,
         "rag_cutoff": RAG_CUTOFF,
+        "system_prompt": SYSTEM_PROMPT_VALUE,
     }
 
 
 @app.post("/config")
 def set_config(update: ConfigUpdate):
-    global RAG_MODE, RAG_TOP_K, RAG_CUTOFF
+    global RAG_MODE, RAG_TOP_K, RAG_CUTOFF, SYSTEM_PROMPT_VALUE
     if update.rag_mode is not None:
         mode = (update.rag_mode or "").strip().lower()
         if mode not in ("auto", "rag_only", "llm_only"):
@@ -520,4 +527,11 @@ def set_config(update: ConfigUpdate):
             RAG_CUTOFF = v
         except Exception:
             raise HTTPException(status_code=400, detail="rag_cutoff має бути числом 0.0..1.0")
+    if update.system_prompt is not None:
+        SYSTEM_PROMPT_VALUE = str(update.system_prompt or DEFAULT_SYSTEM_PROMPT)
+        # Re-apply QA template with new system prompt
+        try:
+            _apply_text_qa_template()
+        except Exception:
+            pass
     return get_config()
