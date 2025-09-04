@@ -38,7 +38,7 @@
         <span id="apiShow" class="muted"></span>
       </span>
     </header>
-    <main style="grid-template-columns: 320px 1fr; grid-template-rows: 1fr auto auto; gap: 0;">
+    <main style="grid-template-columns: 320px 1fr; grid-template-rows: 1fr auto auto auto; gap: 0;">
       <aside style="border-right:1px solid #8883; display:flex; flex-direction:column; overflow:auto;">
         <div style="padding:12px; border-bottom:1px solid #8883; font-weight:600;">Файли контексту</div>
         <div style="padding:12px; display:flex; flex-direction:column; gap:8px;">
@@ -69,6 +69,22 @@
           <label>Cutoff:
             <input id="ragCutoffInput" type="number" min="0" max="1" step="0.01" style="width:100px;" />
           </label>
+          <label>LLM модель
+            <button id="helpLlmModel" title="Пояснення" style="margin-left:6px; padding:2px 6px;">?</button>
+            <input id="llmModelInput" type="text" placeholder="gemini-1.5-flash" style="width:100%;" />
+          </label>
+          <label>Embedding модель
+            <button id="helpEmbedModel" title="Пояснення" style="margin-left:6px; padding:2px 6px;">?</button>
+            <input id="embedModelInput" type="text" placeholder="gemini-embedding-001" style="width:100%;" />
+          </label>
+          <label>Chunk size
+            <button id="helpChunkSize" title="Пояснення" style="margin-left:6px; padding:2px 6px;">?</button>
+            <input id="chunkSizeInput" type="number" min="1" step="1" style="width:120px;" />
+          </label>
+          <label>Chunk overlap
+            <button id="helpChunkOverlap" title="Пояснення" style="margin-left:6px; padding:2px 6px;">?</button>
+            <input id="chunkOverlapInput" type="number" min="0" step="1" style="width:120px;" />
+          </label>
           <label>Системний промпт:
             <textarea id="systemPromptInput" rows="6" placeholder="Опишіть роль і стиль асистента..." style="width:100%;"></textarea>
           </label>
@@ -82,10 +98,12 @@
       <div id="chat" style="grid-column: 2 / span 1; grid-row: 1 / span 1;"></div>
       <div class="row" style="grid-column: 2 / span 1; grid-row: 2 / span 1;">
         <textarea id="input" placeholder="Введіть питання та натисніть Надіслати..."></textarea>
+        <button id="suggestBtn" title="Отримати підказку від моделі">Підказка</button>
         <button id="send">Надіслати</button>
         <span id="loadingIndicator" class="loading" style="display:none;"><span class="spinner"></span>Відповідаю…</span>
       </div>
-      <div id="status" class="muted" style="grid-column: 1 / span 2; grid-row: 3 / span 1;"></div>
+      <div id="suggestion" class="muted" style="padding: 0 12px; grid-column: 2 / span 1; grid-row: 3 / span 1;"></div>
+      <div id="status" class="muted" style="grid-column: 1 / span 2; grid-row: 4 / span 1;"></div>
     </main>
 
     <script>
@@ -93,6 +111,8 @@
       const inputEl = document.getElementById('input');
       const sendBtn = document.getElementById('send');
       const statusEl = document.getElementById('status');
+      const suggestBtn = document.getElementById('suggestBtn');
+      const suggestionEl = document.getElementById('suggestion');
       const loadingIndicator = document.getElementById('loadingIndicator');
 
       // Full chat history that we will send with every ask
@@ -342,6 +362,24 @@
       });
       sendBtn.addEventListener('click', sendMessage);
 
+      async function fetchSuggestion() {
+        try {
+          const res = await fetch(api('/suggest'));
+          if (!res.ok) throw new Error('HTTP ' + res.status);
+          const data = await res.json();
+          const s = (data.suggestion || '').trim();
+          if (s) {
+            suggestionEl.textContent = 'Підказка: ' + s;
+            inputEl.value = s;
+          } else {
+            suggestionEl.textContent = 'Підказка недоступна';
+          }
+        } catch (e) {
+          suggestionEl.textContent = 'Помилка отримання підказки';
+        }
+      }
+      suggestBtn.addEventListener('click', fetchSuggestion);
+
       // ------ Files UI ------
       const filesEl = document.getElementById('files');
       const fileInput = document.getElementById('fileInput');
@@ -360,7 +398,26 @@
           const div = document.createElement('div');
           const sizeKB = Math.round((f.size || 0) / 102.4) / 10;
           const dt = new Date((f.mtime || 0) * 1000).toLocaleString();
-          div.textContent = `${f.name} — ${sizeKB} KB — ${dt}`;
+          div.style.display = 'flex';
+          div.style.alignItems = 'center';
+          div.style.gap = '8px';
+          const span = document.createElement('span');
+          span.textContent = `${f.name} — ${sizeKB} KB — ${dt}`;
+          const delBtn = document.createElement('button');
+          delBtn.textContent = 'Видалити';
+          delBtn.onclick = async () => {
+            if (!confirm(`Видалити файл "${f.name}"?`)) return;
+            try {
+              const res = await fetch(api('/files/' + encodeURIComponent(f.name)), { method: 'DELETE' });
+              if (!res.ok) throw new Error('HTTP ' + res.status);
+              await refreshFiles();
+              addMessage('system', `Файл видалено: ${f.name}`);
+            } catch (e) {
+              addMessage('system', 'Помилка видалення: ' + e.message);
+            }
+          };
+          div.appendChild(span);
+          div.appendChild(delBtn);
           filesEl.appendChild(div);
         }
       }
@@ -392,9 +449,17 @@
       const ragTopKInput = document.getElementById('ragTopKInput');
       const ragCutoffInput = document.getElementById('ragCutoffInput');
       const systemPromptInput = document.getElementById('systemPromptInput');
+      const llmModelInput = document.getElementById('llmModelInput');
+      const embedModelInput = document.getElementById('embedModelInput');
+      const chunkSizeInput = document.getElementById('chunkSizeInput');
+      const chunkOverlapInput = document.getElementById('chunkOverlapInput');
       const saveConfigBtn = document.getElementById('saveConfigBtn');
       const refreshConfigBtn = document.getElementById('refreshConfigBtn');
       const configInfo = document.getElementById('configInfo');
+      const helpLlmModel = document.getElementById('helpLlmModel');
+      const helpEmbedModel = document.getElementById('helpEmbedModel');
+      const helpChunkSize = document.getElementById('helpChunkSize');
+      const helpChunkOverlap = document.getElementById('helpChunkOverlap');
 
       async function refreshIndexes() {
         const res = await fetch(api('/index/list'));
@@ -420,8 +485,25 @@
             await fetch(api('/index/apply'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ index_id: it.id }) });
             await refreshIndexes();
           };
+          const del = document.createElement('button');
+          del.textContent = 'Видалити';
+          del.onclick = async () => {
+            if (!confirm(`Видалити індекс "${it.id}"?`)) return;
+            try {
+              const res = await fetch(api('/index/' + encodeURIComponent(it.id)), { method: 'DELETE' });
+              if (!res.ok) {
+                const txt = await res.text().catch(()=> '');
+                throw new Error('HTTP ' + res.status + ' ' + txt);
+              }
+              await refreshIndexes();
+              addMessage('system', `Індекс видалено: ${it.id}`);
+            } catch (e) {
+              addMessage('system', 'Помилка видалення індексу: ' + e.message);
+            }
+          };
           row.appendChild(span);
           row.appendChild(btn);
+          row.appendChild(del);
           indexesEl.appendChild(row);
         }
       }
@@ -449,7 +531,11 @@
           ragTopKInput.value = data.rag_top_k != null ? data.rag_top_k : 4;
           ragCutoffInput.value = data.rag_cutoff != null ? data.rag_cutoff : 0.3;
           systemPromptInput.value = data.system_prompt || '';
-          configInfo.textContent = `mode=${ragModeSel.value}, topK=${ragTopKInput.value}, cutoff=${ragCutoffInput.value}`;
+          llmModelInput.value = data.llm_model || '';
+          embedModelInput.value = data.embed_model || '';
+          chunkSizeInput.value = (data.index_chunk_size != null) ? data.index_chunk_size : '';
+          chunkOverlapInput.value = (data.index_chunk_overlap != null) ? data.index_chunk_overlap : '';
+          configInfo.textContent = `mode=${ragModeSel.value}, topK=${ragTopKInput.value}, cutoff=${ragCutoffInput.value}, llm=${llmModelInput.value||'-'}, emb=${embedModelInput.value||'-'}, chunk=${chunkSizeInput.value||'-'}/${chunkOverlapInput.value||'-'}`;
         } catch (e) {
           configInfo.textContent = 'Не вдалося отримати конфіг';
         }
@@ -461,6 +547,10 @@
           rag_top_k: Number(ragTopKInput.value || 4),
           rag_cutoff: Number(ragCutoffInput.value || 0.3),
           system_prompt: systemPromptInput.value,
+          llm_model: (llmModelInput.value || '').trim() || undefined,
+          embed_model: (embedModelInput.value || '').trim() || undefined,
+          index_chunk_size: chunkSizeInput.value ? Number(chunkSizeInput.value) : undefined,
+          index_chunk_overlap: chunkOverlapInput.value ? Number(chunkOverlapInput.value) : undefined,
         };
         try {
           const res = await fetch(api('/config'), {
@@ -477,7 +567,11 @@
           ragTopKInput.value = data.rag_top_k != null ? data.rag_top_k : 4;
           ragCutoffInput.value = data.rag_cutoff != null ? data.rag_cutoff : 0.3;
           systemPromptInput.value = data.system_prompt || '';
-          configInfo.textContent = `Збережено: mode=${data.rag_mode}, topK=${data.rag_top_k}, cutoff=${data.rag_cutoff}`;
+          llmModelInput.value = data.llm_model || '';
+          embedModelInput.value = data.embed_model || '';
+          chunkSizeInput.value = (data.index_chunk_size != null) ? data.index_chunk_size : '';
+          chunkOverlapInput.value = (data.index_chunk_overlap != null) ? data.index_chunk_overlap : '';
+          configInfo.textContent = `Збережено: mode=${data.rag_mode}, topK=${data.rag_top_k}, cutoff=${data.rag_cutoff}, llm=${data.llm_model}, emb=${data.embed_model}, chunk=${data.index_chunk_size}/${data.index_chunk_overlap}`;
           addMessage('system', 'Налаштування збережено');
         } catch (e) {
           addMessage('system', 'Помилка збереження налаштувань: ' + e.message);
@@ -514,3 +608,12 @@
     </script>
   </body>
   </html>
+      // Help popups
+      function bindHelp(btn, text) {
+        if (!btn) return;
+        btn.addEventListener('click', () => alert(text));
+      }
+      bindHelp(helpLlmModel, 'LLM модель: назва моделі генерації тексту (наприклад, gemini-1.5-flash або gemini-1.5-pro).');
+      bindHelp(helpEmbedModel, 'Embedding модель: використовується для векторизації документів та запитів (наприклад, gemini-embedding-001).');
+      bindHelp(helpChunkSize, 'Chunk size: довжина текстового сегмента при індексації. Більші значення дають довші шматки.');
+      bindHelp(helpChunkOverlap, 'Chunk overlap: кількість символів перекриття між сегментами. Має бути меншим за Chunk size.');

@@ -39,3 +39,26 @@ def list_files(request: Request):
             })
     return {"files": items}
 
+
+@router.delete("/files/{name}")
+def delete_file(request: Request, name: str):
+    settings = request.app.state.settings
+    base: Path = settings.data_path
+    base.mkdir(parents=True, exist_ok=True)
+    # Prevent path traversal: only simple filenames allowed
+    if not name or "/" in name or ".." in name or name.startswith("."):
+        raise HTTPException(status_code=400, detail="Неприпустиме ім'я файлу")
+    target = (base / name).resolve()
+    try:
+        # Ensure target is inside base directory
+        base_resolved = base.resolve()
+        if base_resolved not in target.parents and target != base_resolved:
+            raise HTTPException(status_code=400, detail="Шлях за межами каталогу даних")
+        if not target.exists() or not target.is_file():
+            raise HTTPException(status_code=404, detail="Файл не знайдено")
+        target.unlink()
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Помилка видалення файлу: {e}")
+    return {"status": "Файл видалено", "name": name}

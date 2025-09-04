@@ -1,4 +1,5 @@
 from pathlib import Path
+import shutil
 
 from fastapi import APIRouter, HTTPException, Request
 
@@ -14,10 +15,9 @@ router = APIRouter()
 @router.post("/refresh")
 def refresh_index(request: Request):
     settings: AppSettings = request.app.state.settings
-    runtime: RuntimeConfig = request.app.state.runtime
-
     # Full rebuild and activate
-    index_id, idx = build_full_index(settings.data_path, settings.persist_base_path)
+    runtime: RuntimeConfig = request.app.state.runtime
+    index_id, idx = build_full_index(settings, runtime)
     request.app.state.index = idx
     request.app.state.active_index_id = index_id
     return {"status": "Переіндексовано та активовано", "index_id": index_id}
@@ -26,7 +26,8 @@ def refresh_index(request: Request):
 @router.post("/index/build")
 def build_index_all_files(request: Request):
     settings: AppSettings = request.app.state.settings
-    index_id, _ = build_full_index(settings.data_path, settings.persist_base_path)
+    runtime: RuntimeConfig = request.app.state.runtime
+    index_id, _ = build_full_index(settings, runtime)
     return {"status": "Індекс збудовано", "index_id": index_id}
 
 
@@ -56,3 +57,25 @@ def list_indexes(request: Request):
     items.sort(key=lambda x: x["mtime"], reverse=True)
     return {"active": request.app.state.active_index_id, "items": items}
 
+
+@router.delete("/index/{index_id}")
+def delete_index(request: Request, index_id: str):
+    settings: AppSettings = request.app.state.settings
+    active_id = request.app.state.active_index_id
+    # basic validation: simple directory name (timestamp-like). No slashes or traversal.
+    if not index_id or "/" in index_id or ".." in index_id or index_id.startswith("."):
+        raise HTTPException(status_code=400, detail="Неприпустимий ідентифікатор індексу")
+    if active_id == index_id:
+        raise HTTPException(status_code=400, detail="Неможливо видалити активний індекс")
+    base: Path = settings.persist_base_path
+    target = (base / index_id).resolve()
+    base_resolved = base.resolve()
+    if base_resolved not in target.parents:
+        raise HTTPException(status_code=400, detail="Шлях за межами каталогу індексів")
+    if not target.exists() or not target.is_dir():
+        raise HTTPException(status_code=404, detail="Індекс не знайдено")
+    try:
+        shutil.rmtree(target)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Помилка видалення індексу: {e}")
+    return {"status": "Індекс видалено", "index_id": index_id}

@@ -16,4 +16,7 @@ class ConfigUpdate(BaseModel):
     rag_top_k: Optional[int] = None
     rag_cutoff: Optional[float] = None
     system_prompt: Optional[str] = None
-
+    llm_model: Optional[str] = None
+    embed_model: Optional[str] = None
+    index_chunk_size: Optional[int] = None
+    index_chunk_overlap: Optional[int] = None

@@ -1,4 +1,5 @@
 from pathlib import Path
+import uuid
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -11,13 +12,17 @@ from app.api.routes import files as files_routes
 from app.api.routes import indexes as indexes_routes
 from app.api.routes import query as query_routes
 from app.api.routes import ws as ws_routes
+from app.api.routes import suggest as suggest_routes
 from app.core.config import AppSettings, RuntimeConfig
 from app.core.indexing import latest_index_dir, load_index_by_id, build_full_index, has_supported_files
 from app.core.llm import configure_llm
+from app.core.logging import setup_logging
 
 
 def create_app() -> FastAPI:
     settings = AppSettings()
+    # Init logging early
+    setup_logging(settings)
     runtime = RuntimeConfig.from_settings(settings)
 
     app = FastAPI()
@@ -37,6 +42,17 @@ def create_app() -> FastAPI:
         allow_headers=settings.CORS_ALLOW_HEADERS,
     )
 
+    @app.middleware("http")
+    async def add_request_id(request, call_next):
+        rid = str(uuid.uuid4())
+        request.state.request_id = rid
+        response = await call_next(request)
+        try:
+            response.headers["X-Request-ID"] = rid
+        except Exception:
+            pass
+        return response
+
     # Static files and root
     static_dir = settings.base_dir / "static"
     app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
@@ -54,6 +70,7 @@ def create_app() -> FastAPI:
     api_router.include_router(indexes_routes.router)
     api_router.include_router(config_routes.router)
     api_router.include_router(ws_routes.router)
+    api_router.include_router(suggest_routes.router)
     app.include_router(api_router)
 
     @app.on_event("startup")
@@ -65,7 +82,7 @@ def create_app() -> FastAPI:
         if latest is None:
             # If there’s no persisted index yet, only build if there are files
             if has_supported_files(settings.data_path):
-                idx_id, idx = build_full_index(settings.data_path, settings.persist_base_path)
+                idx_id, idx = build_full_index(settings, runtime)
                 app.state.active_index_id = idx_id
                 app.state.index = idx
             else:

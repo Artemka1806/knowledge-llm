@@ -11,6 +11,7 @@ from llama_index.core import (
     load_index_from_storage,
 )
 from llama_index.core.node_parser import SentenceSplitter
+from app.core.config import AppSettings, RuntimeConfig
 
 
 def list_index_dirs(base_dir: Path) -> List[Tuple[str, Path]]:
@@ -39,17 +40,24 @@ def load_index_by_id(persist_base: Path, index_id: str) -> VectorStoreIndex:
     return load_index_from_storage(storage_context)
 
 
-def build_full_index(data_dir: Path, persist_base: Path) -> tuple[str, VectorStoreIndex]:
+def build_full_index(settings: AppSettings, runtime: RuntimeConfig) -> tuple[str, VectorStoreIndex]:
     docs = SimpleDirectoryReader(
-        str(data_dir),
+        str(settings.data_path),
         required_exts=[".txt", ".md"],
         recursive=True,
     ).load_data()
+    # Ensure chunk_overlap < chunk_size (validated in RuntimeConfig)
     idx = VectorStoreIndex.from_documents(
-        docs, transformations=[SentenceSplitter(chunk_size=512)]
+        docs,
+        transformations=[
+            SentenceSplitter(
+                chunk_size=runtime.index_chunk_size,
+                chunk_overlap=runtime.index_chunk_overlap,
+            )
+        ],
     )
     index_id = datetime.now().strftime("%Y%m%d-%H%M%S")
-    persist_dir = persist_base / index_id
+    persist_dir = settings.persist_base_path / index_id
     persist_dir.mkdir(parents=True, exist_ok=True)
     idx.storage_context.persist(persist_dir=str(persist_dir))
     return index_id, idx

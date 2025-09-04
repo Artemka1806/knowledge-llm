@@ -9,8 +9,8 @@ def configure_llm(settings: AppSettings, runtime: RuntimeConfig) -> None:
     if not settings.GOOGLE_API_KEY:
         raise RuntimeError("GOOGLE_API_KEY не задано у .env")
 
-    Settings.llm = GoogleGenAI(model=settings.LLM_MODEL, api_key=settings.GOOGLE_API_KEY)
-    Settings.embed_model = GeminiEmbedding(model=settings.EMBED_MODEL, api_key=settings.GOOGLE_API_KEY)
+    Settings.llm = GoogleGenAI(model=runtime.llm_model, api_key=settings.GOOGLE_API_KEY)
+    Settings.embed_model = GeminiEmbedding(model=runtime.embed_model, api_key=settings.GOOGLE_API_KEY)
 
     apply_text_qa_template(runtime.system_prompt)
 
@@ -28,4 +28,3 @@ def apply_text_qa_template(system_prompt: str) -> None:
             "- Відповідай українською, стисло та по суті."
         )
     )
-

@@ -20,6 +20,10 @@ class AppSettings(BaseSettings):
     LLM_MODEL: str = "gemini-1.5-flash"
     EMBED_MODEL: str = "gemini-embedding-001"
 
+    # Indexing
+    INDEX_CHUNK_SIZE: int = 126
+    INDEX_CHUNK_OVERLAP: int = 20
+
     # Runtime defaults (can be changed via /config)
     RAG_MODE: str = "auto"  # auto|rag_only|llm_only
     RAG_TOP_K: int = 4
@@ -43,6 +47,26 @@ class AppSettings(BaseSettings):
         env_file_encoding="utf-8",
         extra="ignore",
     )
+
+    @field_validator("INDEX_CHUNK_SIZE", "INDEX_CHUNK_OVERLAP")
+    @classmethod
+    def _validate_non_negative(cls, v: int) -> int:
+        if int(v) < 0:
+            raise ValueError("INDEX_CHUNK_SIZE/INDEX_CHUNK_OVERLAP must be >= 0")
+        return int(v)
+
+    @field_validator("INDEX_CHUNK_OVERLAP")
+    @classmethod
+    def _validate_overlap_bound(cls, v: int, info):
+        # Cross-field check is finalized in model validator below; keep basic int cast here
+        return int(v)
+
+    # Ensure overlap < size after all fields are populated
+    def model_post_init(self, __context) -> None:  # pydantic v2 hook
+        if self.INDEX_CHUNK_OVERLAP >= self.INDEX_CHUNK_SIZE:
+            raise ValueError(
+                "INDEX_CHUNK_OVERLAP must be smaller than INDEX_CHUNK_SIZE"
+            )
 
     @property
     def base_dir(self) -> Path:
@@ -69,6 +93,10 @@ class RuntimeConfig(BaseModel):
     rag_top_k: int
     rag_cutoff: float
     system_prompt: str
+    llm_model: str
+    embed_model: str
+    index_chunk_size: int
+    index_chunk_overlap: int
 
     @field_validator("rag_mode")
     @classmethod
@@ -85,5 +113,24 @@ class RuntimeConfig(BaseModel):
             rag_top_k=s.RAG_TOP_K,
             rag_cutoff=s.RAG_CUTOFF,
             system_prompt=s.system_prompt_effective,
+            llm_model=s.LLM_MODEL,
+            embed_model=s.EMBED_MODEL,
+            index_chunk_size=s.INDEX_CHUNK_SIZE,
+            index_chunk_overlap=s.INDEX_CHUNK_OVERLAP,
         )
 
+    @field_validator("index_chunk_size", "index_chunk_overlap")
+    @classmethod
+    def _validate_non_negative(cls, v: int) -> int:
+        if int(v) < 0:
+            raise ValueError("chunk size/overlap must be >= 0")
+        return int(v)
+
+    @field_validator("index_chunk_overlap")
+    @classmethod
+    def _validate_overlap_bound(cls, v: int, info):
+        return int(v)
+
+    def model_post_init(self, __context) -> None:
+        if self.index_chunk_overlap >= self.index_chunk_size:
+            raise ValueError("index_chunk_overlap must be smaller than index_chunk_size")
