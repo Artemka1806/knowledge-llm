@@ -1,0 +1,17 @@
+version: "3.9"
+
+services:
+  app:
+    build: .
+    container_name: knowledge-llm
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    # Loads environment variables for the app (e.g., GOOGLE_API_KEY)
+    env_file:
+      - .env
+    # Persist data and indexes across restarts
+    volumes:
+      - ./data:/app/data
+      - ./storage:/app/storage
+
